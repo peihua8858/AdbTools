@@ -11,9 +11,9 @@
         日志过滤、截图录屏、内存分析等常用 adb 调试操作，命令输出实时显示在工具窗口控制台。
     ]]></description>
 
-    <depends>com.intellij.modules.compose</depends>
-
     <resource-bundle>messages.MyMessageBundle</resource-bundle>
+
+    <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="AdbTools"

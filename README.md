@@ -1,7 +1,10 @@
 # AdbTools
 
-把 `adb_tools.sh` 的全部功能搬进 IDE 工具窗口的 IntelliJ Platform 插件。界面使用 Compose + Jewel，
-左侧为分类 / 功能菜单，右侧为参数表单与实时命令输出控制台。
+把 `adb_tools.sh` 的全部功能搬进 IDE 工具窗口的 IntelliJ Platform 插件。界面使用 Swing（`JBLabel` / `JBTextField` /
+`JTextPane` 等 IntelliJ 自带组件），左侧为分类 / 功能菜单，右侧为参数表单与实时命令输出控制台。
+
+> 当前分支 `compat/2023.2`：为兼容 IntelliJ IDEA 2023.2（`sinceBuild = 232`）而用 Swing 重写了界面。
+> 原 Compose + Jewel 实现位于 `main` 分支，需要 2025.2+ 才能显示界面。
 
 ## 功能
 
@@ -24,18 +27,18 @@ UT 实时上报完成后会校验进程是否真正重启。
 
 ## 界面
 
-- 顶部设备区提供「刷新 / 设备 / 设置」，下方可直接「重启设备」「重启 adb」
+- 顶部一行：左侧为设备信息（点击弹出设备列表，可切换设备或刷新设备列表），右侧对齐「刷新设备 / 设置 / 重启设备 / 重启 adb」，整行垂直居中
 - 左侧分类可折叠，默认全部收起；支持按功能名 / 说明关键字搜索
 - 功能可收藏，收藏项固定在导航顶部
 - 自动记忆上次选择的分类与功能、输入框历史值、控制台高度
 - 参数区与控制台之间可拖动分隔条调整高度
 - 控制台支持自动滚动、只看问题（警告 / 错误），并可复制最后执行的 adb 命令
+- 「安装应用」支持把本地 `.apk` 直接拖到文件路径输入框
 
 ## 环境要求
 
-- IntelliJ IDEA 2025.2+ / Android Studio 2025.2+（`sinceBuild = 252`）
-- 2024.3 及更早版本内置的 Jewel 缺少 `addComposeTab` 等 API，插件无法显示界面
-- JDK 21
+- IntelliJ IDEA 2023.2+ / Android Studio Giraffe 2023.2+（`sinceBuild = 232`，`232.10300` 可用）
+- JDK 17+（JVM target 17，构建使用 JDK 21 亦可）
 - Android SDK platform-tools（adb）
 
 ## 安装与入口
@@ -59,6 +62,8 @@ UT 实时上报完成后会校验进程是否真正重启。
 ./gradlew test         # 运行解析、注册表与工具窗口冒烟测试
 ./gradlew buildPlugin  # 打包 zip 到 build/distributions
 ```
+
+工具链：Gradle 8.10.2、Kotlin 1.9.25、IntelliJ Platform Gradle Plugin 2.9.0，编译目标 `IntelliJ IDEA Community 2023.2.5`。
 
 ## adb 定位顺序
 

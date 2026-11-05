@@ -1,12 +1,5 @@
 package com.peihua8858.adbtools.ui
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateList
-import androidx.compose.runtime.snapshots.SnapshotStateMap
 import com.peihua8858.adbtools.action.ActionContext
 import com.peihua8858.adbtools.action.ActionField
 import com.peihua8858.adbtools.action.AdbAction
@@ -20,6 +13,7 @@ import com.peihua8858.adbtools.adb.CommandResult
 import com.peihua8858.adbtools.adb.LogLevel
 import com.peihua8858.adbtools.adb.LogLine
 import com.peihua8858.adbtools.adb.ProcessEntry
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import kotlinx.coroutines.CancellationException
@@ -38,7 +32,9 @@ import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AdbToolState(
     val project: Project,
@@ -47,28 +43,36 @@ class AdbToolState(
     private val client = AdbClient(project, settings)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val devices: SnapshotStateList<AdbDevice> = mutableStateListOf()
-    val output: SnapshotStateList<LogLine> = mutableStateListOf()
-    val fieldHistory: SnapshotStateMap<String, List<String>> = mutableStateMapOf<String, List<String>>().apply {
+    private val deviceList = mutableListOf<AdbDevice>()
+    private val outputLines = mutableListOf<LogLine>()
+    private val history = mutableMapOf<String, List<String>>().apply {
         settings.state.fieldHistory.forEach { (fieldId, raw) ->
             val items = raw.split('\n').filter { it.isNotBlank() }
             if (items.isNotEmpty()) put(fieldId, items)
         }
     }
 
-    var selectedSerial by mutableStateOf<String?>(settings.state.lastSerial.ifBlank { null })
+    private val listeners = CopyOnWriteArrayList<() -> Unit>()
+    private val notifyQueued = AtomicBoolean(false)
+
+    @Volatile
+    var selectedSerial: String? = settings.state.lastSerial.ifBlank { null }
         private set
 
-    var adbPath by mutableStateOf<String?>(null)
+    @Volatile
+    var adbPath: String? = null
         private set
 
-    var adbError by mutableStateOf<String?>(null)
+    @Volatile
+    var adbError: String? = null
         private set
 
-    var busy by mutableStateOf(false)
+    @Volatile
+    var busy: Boolean = false
         private set
 
-    var runningTitle by mutableStateOf<String?>(null)
+    @Volatile
+    var runningTitle: String? = null
         private set
 
     private var activeJob: Job? = null
@@ -76,17 +80,35 @@ class AdbToolState(
     @Volatile
     private var activeProcess: Process? = null
 
+    @Volatile
+    private var disposed = false
+
     init {
         refreshDevices()
     }
 
-    fun selectedDevice(): AdbDevice? = devices.firstOrNull { it.serial == selectedSerial }
+    fun addChangeListener(listener: () -> Unit) {
+        listeners += listener
+    }
+
+    fun removeChangeListener(listener: () -> Unit) {
+        listeners -= listener
+    }
+
+    fun devices(): List<AdbDevice> = synchronized(deviceList) { deviceList.toList() }
+
+    fun outputSnapshot(): List<LogLine> = synchronized(outputLines) { outputLines.toList() }
+
+    fun fieldHistory(fieldId: String): List<String> = history[fieldId].orEmpty()
+
+    fun selectedDevice(): AdbDevice? = devices().firstOrNull { it.serial == selectedSerial }
 
     fun outputDirectory(): File = client.outputDirectory()
 
     fun selectDevice(serial: String) {
         selectedSerial = serial
         settings.state.lastSerial = serial
+        notifyChanged()
     }
 
     fun rememberSelection(categoryId: String, actionId: String) {
@@ -97,7 +119,10 @@ class AdbToolState(
     fun toggleFavorite(actionId: String) {
         val favorites = settings.state.favoriteActionIds
         if (!favorites.remove(actionId)) favorites.add(actionId)
+        notifyChanged()
     }
+
+    fun favoriteIds(): Set<String> = settings.state.favoriteActionIds.toSet()
 
     fun refreshDevices() {
         scope.launch {
@@ -109,8 +134,10 @@ class AdbToolState(
                 val withModels = raw.map { device ->
                     if (device.isOnline) device.copy(model = client.queryModel(device.serial)) else device
                 }
-                devices.clear()
-                devices.addAll(withModels)
+                synchronized(deviceList) {
+                    deviceList.clear()
+                    deviceList.addAll(withModels)
+                }
                 val current = selectedSerial
                 val stillOnline = withModels.any { it.serial == current && it.isOnline }
                 if (!stillOnline) {
@@ -120,11 +147,13 @@ class AdbToolState(
                 if (withModels.isEmpty()) {
                     log("adb 已就绪，但未检测到已连接设备", LogLevel.WARNING)
                 }
+                notifyChanged()
             } catch (t: Throwable) {
                 adbPath = null
                 adbError = t.message ?: t.javaClass.simpleName
-                devices.clear()
+                synchronized(deviceList) { deviceList.clear() }
                 log(t.message ?: "ADB 初始化失败", LogLevel.ERROR)
+                notifyChanged()
             }
         }
     }
@@ -136,7 +165,7 @@ class AdbToolState(
 
     fun requireSerial(): String {
         val serial = selectedSerial ?: throw AdbException("请先连接设备，并在顶部选择一台设备")
-        val device = devices.firstOrNull { it.serial == serial }
+        val device = devices().firstOrNull { it.serial == serial }
         if (device != null && !device.isOnline) {
             throw AdbException("设备 $serial 当前状态为 ${device.state}，无法执行命令")
         }
@@ -178,6 +207,7 @@ class AdbToolState(
         runningTitle = title
         log("", LogLevel.DIVIDER)
         log("开始执行：$title", LogLevel.TITLE)
+        notifyChanged()
         val start = System.currentTimeMillis()
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
@@ -191,6 +221,7 @@ class AdbToolState(
                 busy = false
                 runningTitle = null
                 activeJob = null
+                notifyChanged()
             }
         }
         activeJob = job
@@ -214,6 +245,7 @@ class AdbToolState(
             client.resolveAdb()
         } catch (t: Throwable) {
             adbError = t.message
+            notifyChanged()
             throw t
         }
         adbPath = adb
@@ -270,28 +302,31 @@ class AdbToolState(
     }
 
     fun log(text: String, level: LogLevel = LogLevel.NORMAL) {
+        if (disposed) return
         val chunks = if (text.isEmpty()) listOf("") else text.split('\n')
-        synchronized(output) {
-            if (output.size + chunks.size > MAX_OUTPUT_LINES) {
-                val removeCount = output.size + chunks.size - MAX_OUTPUT_LINES + 500
-                repeat(removeCount.coerceAtMost(output.size)) { output.removeAt(0) }
+        synchronized(outputLines) {
+            if (outputLines.size + chunks.size > MAX_OUTPUT_LINES) {
+                val removeCount = outputLines.size + chunks.size - MAX_OUTPUT_LINES + 500
+                repeat(removeCount.coerceAtMost(outputLines.size)) { outputLines.removeAt(0) }
             }
-            chunks.forEach { chunk -> output.add(LogLine(chunk.trimEnd(), level)) }
+            chunks.forEach { chunk -> outputLines.add(LogLine(chunk.trimEnd(), level)) }
         }
+        notifyChanged()
     }
 
     fun clearOutput() {
-        synchronized(output) { output.clear() }
+        synchronized(outputLines) { outputLines.clear() }
+        notifyChanged()
     }
 
-    fun outputText(): String = output.joinToString("\n") { it.text }
+    fun outputText(): String = outputSnapshot().joinToString("\n") { it.text }
 
     fun copyOutput() {
         CopyPasteManager.getInstance().setContents(StringSelection(outputText()))
     }
 
     fun copyLastCommand() {
-        val command = output.lastOrNull { it.level == LogLevel.COMMAND }?.text
+        val command = outputSnapshot().lastOrNull { it.level == LogLevel.COMMAND }?.text
         if (command.isNullOrBlank()) {
             log("暂无可复制的命令，请先执行一次功能", LogLevel.WARNING)
             return
@@ -326,8 +361,24 @@ class AdbToolState(
     }
 
     fun dispose() {
+        disposed = true
         activeProcess?.destroy()
         scope.cancel()
+        listeners.clear()
+    }
+
+    private fun notifyChanged() {
+        if (disposed) return
+        if (!notifyQueued.compareAndSet(false, true)) return
+        val app = ApplicationManager.getApplication()
+        if (app == null) {
+            notifyQueued.set(false)
+            return
+        }
+        app.invokeLater {
+            notifyQueued.set(false)
+            if (!disposed) listeners.forEach { it() }
+        }
     }
 
     private fun persistHints(values: Map<String, String>) {
@@ -345,9 +396,9 @@ class AdbToolState(
             .forEach { field ->
                 val value = values[field.id]?.trim().orEmpty()
                 if (value.isEmpty() || value == field.defaultValue) return@forEach
-                val updated = (listOf(value) + fieldHistory[field.id].orEmpty().filter { it != value })
+                val updated = (listOf(value) + history[field.id].orEmpty().filter { it != value })
                     .take(MAX_FIELD_HISTORY)
-                fieldHistory[field.id] = updated
+                history[field.id] = updated
                 settings.state.fieldHistory[field.id] = updated.joinToString("\n")
             }
     }

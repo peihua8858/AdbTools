@@ -10,7 +10,12 @@ val appActions: List<AdbAction> = listOf(
         title = "安装应用",
         summary = "选择本地 APK 安装到当前设备，默认覆盖安装并允许测试包。",
         fields = listOf(
-            fileField("apk", "APK 文件", placeholder = "选择或输入 APK 路径"),
+            fileField(
+                "apk",
+                "APK 文件",
+                placeholder = "选择或输入 APK 路径",
+                hint = "也可以直接把 .apk 文件拖到输入框",
+            ),
             checkField("replace", "覆盖安装（-r）", defaultValue = true),
             checkField("allowTest", "允许测试包（-t）", defaultValue = true),
             checkField("downgrade", "允许降级（-d）"),
